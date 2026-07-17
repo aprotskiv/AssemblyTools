@@ -26,7 +26,7 @@ namespace LeXtudio.Metadata.Mutable
         private string _fileName;
         private bool _readMethodBodies = true;
         private int _entryPointToken;
-        
+
         // Handle caches
         private Dictionary<TypeDefinitionHandle, MutableTypeDefinition> _typeDefCache;
         private Dictionary<MethodDefinitionHandle, MutableMethodDefinition> _methodDefCache;
@@ -86,12 +86,12 @@ namespace LeXtudio.Metadata.Mutable
 
             _peReader = new PEReader(new MemoryStream(_originalImageBytes));
             _metadataReader = _peReader.GetMetadataReader();
-            
+
             InitializeCaches();
-            
+
             // Create assembly
             _assembly = ReadAssemblyDefinition();
-            
+
             // Create main module
             _module = ReadModuleDefinition();
             _module.Assembly = _assembly;
@@ -99,12 +99,12 @@ namespace LeXtudio.Metadata.Mutable
             _module.OriginalImageBytes = _originalImageBytes;
             _assembly.Modules.Add(_module);
             _module.InitializeTypeSystem();
-            
+
             // Read assembly references first
             ReadAssemblyReferences();
             ReadModuleReferences();
             ReadResources();
-            
+
             // Read types
             ReadTypes();
 
@@ -113,7 +113,7 @@ namespace LeXtudio.Metadata.Mutable
 
             // Populate custom attributes once all definitions exist
             ReadCustomAttributes();
-            
+
             return _assembly;
         }
 
@@ -169,12 +169,12 @@ namespace LeXtudio.Metadata.Mutable
         {
             var moduleDef = _metadataReader.GetModuleDefinition();
             var moduleName = _metadataReader.GetString(moduleDef.Name);
-            
+
             var kind = MutableModuleKind.Dll;
             if (_peReader.PEHeaders.IsExe)
             {
-                kind = _peReader.PEHeaders.PEHeader.Subsystem == Subsystem.WindowsCui 
-                    ? MutableModuleKind.Console 
+                kind = _peReader.PEHeaders.PEHeader.Subsystem == Subsystem.WindowsCui
+                    ? MutableModuleKind.Console
                     : MutableModuleKind.Windows;
             }
 
@@ -211,7 +211,7 @@ namespace LeXtudio.Metadata.Mutable
                     PublicKeyToken = _metadataReader.GetBlobBytes(asmRef.PublicKeyOrToken),
                     Attributes = (AssemblyNameFlags)asmRef.Flags
                 };
-                
+
                 _asmRefCache[handle] = reference;
                 _module.AssemblyReferences.Add(reference);
             }
@@ -352,7 +352,7 @@ namespace LeXtudio.Metadata.Mutable
                     continue;
 
                 var typeDef = _metadataReader.GetTypeDefinition(handle);
-                
+
                 // Read fields
                 var fieldHandles = typeDef.GetFields();
                 if (fieldHandles.Count > 0 &&
@@ -366,7 +366,7 @@ namespace LeXtudio.Metadata.Mutable
                     // Register field into type (adds to list and fast map)
                     type.RegisterField(field);
                 }
-                
+
                 // Read methods
                 var methodHandles = typeDef.GetMethods();
                 if (methodHandles.Count > 0 &&
@@ -436,7 +436,7 @@ namespace LeXtudio.Metadata.Mutable
                     continue;
 
                 var typeDef = _metadataReader.GetTypeDefinition(handle);
-                
+
                 // Read properties
                 var propertyHandles = typeDef.GetProperties();
                 if (propertyHandles.Count > 0 &&
@@ -449,7 +449,7 @@ namespace LeXtudio.Metadata.Mutable
                     var prop = ReadPropertyDefinition(propHandle, type);
                     type.Properties.Add(prop);
                 }
-                
+
                 // Read events
                 var eventHandles = typeDef.GetEvents();
                 if (eventHandles.Count > 0 &&
@@ -485,10 +485,10 @@ namespace LeXtudio.Metadata.Mutable
         {
             var fieldDef = _metadataReader.GetFieldDefinition(handle);
             var name = _metadataReader.GetString(fieldDef.Name);
-            
+
             // Decode field type from signature
             var signature = fieldDef.DecodeSignature(GetTypeProvider(), null);
-            
+
             var field = new MutableFieldDefinition(name, fieldDef.Attributes, signature)
             {
                 DeclaringType = declaringType,
@@ -497,7 +497,7 @@ namespace LeXtudio.Metadata.Mutable
 
             // Preserve FieldLayout table entries used by explicit-layout structs.
             field.Offset = fieldDef.GetOffset();
-            
+
             // Read initial value if present
             if ((fieldDef.Attributes & FieldAttributes.HasFieldRVA) != 0)
             {
@@ -507,8 +507,12 @@ namespace LeXtudio.Metadata.Mutable
                     var size = GetFieldInitialValueSize(signature);
                     if (size > 0)
                     {
-                        var reader = _peReader.GetSectionData(rva).GetReader(0, size);
-                        field.InitialValue = reader.ReadBytes(size);
+                        var rvaMemoryBlock = _peReader.GetSectionData(rva);
+                        if (rvaMemoryBlock.Length > 0)
+                        {
+                            var reader = rvaMemoryBlock.GetReader(0, size);
+                            field.InitialValue = reader.ReadBytes(size);
+                        }
                     }
                 }
             }
@@ -564,7 +568,7 @@ namespace LeXtudio.Metadata.Mutable
         {
             var methodDef = _metadataReader.GetMethodDefinition(handle);
             var name = _metadataReader.GetString(methodDef.Name);
-            
+
             var method = new MutableMethodDefinition(name, methodDef.Attributes, _module.TypeSystem?.Void)
             {
                 DeclaringType = declaringType,
@@ -711,7 +715,7 @@ namespace LeXtudio.Metadata.Mutable
                 {
                     method.Body.Variables.Capacity = locals.Length;
                 }
-                
+
                 for (int i = 0; i < locals.Length; i++)
                 {
                     var localType = locals[i];
@@ -777,7 +781,7 @@ namespace LeXtudio.Metadata.Mutable
             }
 
             var offsetToInstruction = new Dictionary<int, MutableInstruction>(estimatedInstructionCount);
-            
+
             int position = 0;
             while (position < ilBytes.Length)
             {
@@ -868,66 +872,66 @@ namespace LeXtudio.Metadata.Mutable
             {
                 case MutableOperandType.InlineNone:
                     return null;
-                    
+
                 case MutableOperandType.ShortInlineBrTarget:
                     return (int)(sbyte)ilBytes[position++];
-                    
+
                 case MutableOperandType.InlineBrTarget:
                     return ReadInt32(ilBytes, ref position);
-                    
+
                 case MutableOperandType.ShortInlineI:
                     return opCode.Name == "ldc.i4.s" ? (object)(sbyte)ilBytes[position++] : (object)ilBytes[position++];
-                    
+
                 case MutableOperandType.InlineI:
                     return ReadInt32(ilBytes, ref position);
-                    
+
                 case MutableOperandType.InlineI8:
                     return ReadInt64(ilBytes, ref position);
-                    
+
                 case MutableOperandType.ShortInlineR:
                     return ReadSingle(ilBytes, ref position);
-                    
+
                 case MutableOperandType.InlineR:
                     return ReadDouble(ilBytes, ref position);
-                    
+
                 case MutableOperandType.InlineString:
                     var stringToken = ReadInt32(ilBytes, ref position);
                     var userStringHandle = MetadataTokens.UserStringHandle(stringToken & 0x00FFFFFF);
                     return _metadataReader.GetUserString(userStringHandle);
-                    
+
                 case MutableOperandType.InlineMethod:
                     var methodToken = ReadInt32(ilBytes, ref position);
                     return ResolveMethodToken(methodToken);
-                    
+
                 case MutableOperandType.InlineField:
                     var fieldToken = ReadInt32(ilBytes, ref position);
                     return ResolveFieldToken(fieldToken);
-                    
+
                 case MutableOperandType.InlineType:
                     var typeToken = ReadInt32(ilBytes, ref position);
                     return ResolveTypeToken(typeToken);
-                    
+
                 case MutableOperandType.InlineTok:
                     var token = ReadInt32(ilBytes, ref position);
                     return ResolveToken(token);
-                    
+
                 case MutableOperandType.InlineSig:
                     return ReadInt32(ilBytes, ref position); // Signature token
-                    
+
                 case MutableOperandType.ShortInlineVar:
                     var varIndex = ilBytes[position++];
                     return varIndex < body.Variables.Count ? body.Variables[varIndex] : null;
-                    
+
                 case MutableOperandType.InlineVar:
                     var varIndex2 = ReadUInt16(ilBytes, ref position);
                     return varIndex2 < body.Variables.Count ? body.Variables[varIndex2] : null;
-                    
+
                 case MutableOperandType.ShortInlineArg:
                     return ilBytes[position++]; // Argument index
-                    
+
                 case MutableOperandType.InlineArg:
                     return ReadUInt16(ilBytes, ref position); // Argument index
-                    
+
                 case MutableOperandType.InlineSwitch:
                     var count = ReadInt32(ilBytes, ref position);
                     var targets = new int[count];
@@ -936,7 +940,7 @@ namespace LeXtudio.Metadata.Mutable
                         targets[i] = ReadInt32(ilBytes, ref position);
                     }
                     return targets;
-                    
+
                 default:
                     return null;
             }
@@ -1422,7 +1426,7 @@ namespace LeXtudio.Metadata.Mutable
         private object ReadConstant(Constant constant)
         {
             var reader = _metadataReader.GetBlobReader(constant.Value);
-            
+
             switch (constant.TypeCode)
             {
                 case ConstantTypeCode.Boolean: return reader.ReadBoolean();
@@ -1560,31 +1564,31 @@ namespace LeXtudio.Metadata.Mutable
             switch (constructor.Kind)
             {
                 case HandleKind.MethodDefinition:
-                {
-                    var handle = (MethodDefinitionHandle)constructor;
-                    if (_methodDefCache.TryGetValue(handle, out var method))
                     {
-                        attributeType = method.DeclaringType;
-                        return method;
-                    }
+                        var handle = (MethodDefinitionHandle)constructor;
+                        if (_methodDefCache.TryGetValue(handle, out var method))
+                        {
+                            attributeType = method.DeclaringType;
+                            return method;
+                        }
 
-                    var def = _metadataReader.GetMethodDefinition(handle);
-                    attributeType = ReadTypeReference(def.GetDeclaringType());
-                    var sig = def.DecodeSignature(GetTypeProvider(), null);
-                    return CreateMethodReference(_metadataReader.GetString(def.Name), sig, attributeType);
-                }
+                        var def = _metadataReader.GetMethodDefinition(handle);
+                        attributeType = ReadTypeReference(def.GetDeclaringType());
+                        var sig = def.DecodeSignature(GetTypeProvider(), null);
+                        return CreateMethodReference(_metadataReader.GetString(def.Name), sig, attributeType);
+                    }
                 case HandleKind.MemberReference:
-                {
-                    var memberRef = _metadataReader.GetMemberReference((MemberReferenceHandle)constructor);
-                    attributeType = ReadTypeReference(memberRef.Parent);
-                    var sig = memberRef.DecodeMethodSignature(GetTypeProvider(), null);
-                    return CreateMethodReference(_metadataReader.GetString(memberRef.Name), sig, attributeType);
-                }
+                    {
+                        var memberRef = _metadataReader.GetMemberReference((MemberReferenceHandle)constructor);
+                        attributeType = ReadTypeReference(memberRef.Parent);
+                        var sig = memberRef.DecodeMethodSignature(GetTypeProvider(), null);
+                        return CreateMethodReference(_metadataReader.GetString(memberRef.Name), sig, attributeType);
+                    }
                 case HandleKind.MethodSpecification:
-                {
-                    var spec = _metadataReader.GetMethodSpecification((MethodSpecificationHandle)constructor);
-                    return ResolveAttributeConstructor(spec.Method, out attributeType);
-                }
+                    {
+                        var spec = _metadataReader.GetMethodSpecification((MethodSpecificationHandle)constructor);
+                        return ResolveAttributeConstructor(spec.Method, out attributeType);
+                    }
                 default:
                     return null;
             }
@@ -2020,7 +2024,7 @@ namespace LeXtudio.Metadata.Mutable
     {
         // Single-byte opcodes (0x00-0xFF) - direct array indexing for O(1) lookup
         private static readonly MutableOpCode[] _singleByteOpCodes = new MutableOpCode[256];
-        
+
         // Two-byte opcodes (0xFExx) - dictionary for less frequent lookups
         private static readonly Dictionary<byte, MutableOpCode> _twoByteOpCodes = new Dictionary<byte, MutableOpCode>();
 
@@ -2034,7 +2038,7 @@ namespace LeXtudio.Metadata.Mutable
                 {
                     var opCode = (MutableOpCode)field.GetValue(null);
                     short value = opCode.Value;
-                    
+
                     if ((value & 0xFF00) == 0xFE00)
                     {
                         // Two-byte opcode (0xFE prefix)
@@ -2075,10 +2079,10 @@ namespace LeXtudio.Metadata.Mutable
         {
             if ((value & 0xFF00) == 0xFE00)
                 return GetTwoByteOpCode((byte)(value & 0xFF));
-            
+
             if (value >= 0 && value <= 255)
                 return GetSingleByteOpCode((byte)value);
-            
+
             return MutableOpCodes.Nop; // Fallback
         }
     }
@@ -2105,7 +2109,7 @@ namespace LeXtudio.Metadata.Mutable
         private readonly Dictionary<AssemblyReferenceHandle, MutableAssemblyNameReference> _asmRefCache;
         private readonly Func<EntityHandle, MutableTypeReference> _typeResolver;
 
-        public TypeProvider(MutableModuleDefinition module, MetadataReader reader, 
+        public TypeProvider(MutableModuleDefinition module, MetadataReader reader,
             Dictionary<AssemblyReferenceHandle, MutableAssemblyNameReference> asmRefCache,
             Func<EntityHandle, MutableTypeReference> typeResolver)
         {
@@ -2224,7 +2228,7 @@ namespace LeXtudio.Metadata.Mutable
         public MutableTypeReference GetArrayType(MutableTypeReference elementType, ArrayShape shape) => new MutableArrayType(elementType, shape.Rank);
         public MutableTypeReference GetByReferenceType(MutableTypeReference elementType) => new MutableByReferenceType(elementType);
         public MutableTypeReference GetPointerType(MutableTypeReference elementType) => new MutablePointerType(elementType);
-        
+
         public MutableTypeReference GetGenericInstantiation(MutableTypeReference genericType, System.Collections.Immutable.ImmutableArray<MutableTypeReference> typeArguments)
         {
             var instance = new MutableGenericInstanceType(genericType, typeArguments.Length);
