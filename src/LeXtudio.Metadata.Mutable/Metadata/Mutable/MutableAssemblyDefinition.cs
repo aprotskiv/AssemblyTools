@@ -302,6 +302,11 @@ namespace LeXtudio.Metadata.Mutable
         /// Whether to write symbols.
         /// </summary>
         public bool WriteSymbols { get; set; }
+
+        /// <summary>
+        /// Determines whether to write native Win32 resources or not
+        /// </summary>
+        public bool WriteNativeResources { get; set; } = true;
     }
 
     /// <summary>

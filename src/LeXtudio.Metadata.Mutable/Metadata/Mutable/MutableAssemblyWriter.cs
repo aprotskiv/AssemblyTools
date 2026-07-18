@@ -2431,23 +2431,26 @@ namespace LeXtudio.Metadata.Mutable
                 : 0;
 
             ResourceSectionBuilder nativeResources = null;
-            if (module.OriginalImageBytes != null && module.OriginalImageBytes.Length > 0)
+            if (_parameters.WriteNativeResources)
             {
-                try
+                if (module.OriginalImageBytes != null && module.OriginalImageBytes.Length > 0)
                 {
-                    using var origPeStream = new MemoryStream(module.OriginalImageBytes);
-                    using var origPeReader = new PEReader(origPeStream);
-                    var resourceDir = origPeReader.PEHeaders.PEHeader?.ResourceTableDirectory;
-                    if (resourceDir.HasValue && resourceDir.Value.Size > 0 && resourceDir.Value.RelativeVirtualAddress != 0)
+                    try
                     {
-                        var sectionData = origPeReader.GetSectionData(resourceDir.Value.RelativeVirtualAddress);
-                        var resourceBytes = sectionData.GetReader(0, resourceDir.Value.Size).ReadBytes(resourceDir.Value.Size);
-                        nativeResources = new RawWin32ResourceSectionBuilder(resourceBytes);
+                        using var origPeStream = new MemoryStream(module.OriginalImageBytes);
+                        using var origPeReader = new PEReader(origPeStream);
+                        var resourceDir = origPeReader.PEHeaders.PEHeader?.ResourceTableDirectory;
+                        if (resourceDir.HasValue && resourceDir.Value.Size > 0 && resourceDir.Value.RelativeVirtualAddress != 0)
+                        {
+                            var sectionData = origPeReader.GetSectionData(resourceDir.Value.RelativeVirtualAddress);
+                            var resourceBytes = sectionData.GetReader(0, resourceDir.Value.Size).ReadBytes(resourceDir.Value.Size);
+                            nativeResources = new RawWin32ResourceSectionBuilder(resourceBytes);
+                        }
                     }
-                }
-                catch
-                {
-                    // Best-effort: if we can't read native resources, proceed without them.
+                    catch
+                    {
+                        // Best-effort: if we can't read native resources, proceed without them.
+                    }
                 }
             }
 
