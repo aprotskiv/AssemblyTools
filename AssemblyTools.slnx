@@ -1,0 +1,13 @@
+<Solution>
+  <Folder Name="/Solution/">
+    <File Path="docs/design.md" />
+    <File Path="LICENSE" />
+    <File Path="README.md" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/LeXtudio.Metadata.Mutable/LeXtudio.Metadata.Mutable.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/LeXtudio.Metadata.Mutable.Tests/LeXtudio.Metadata.Mutable.Tests.csproj" />
+  </Folder>
+</Solution>
