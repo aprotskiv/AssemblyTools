@@ -2437,12 +2437,22 @@ namespace LeXtudio.Metadata.Mutable
                 {
                     using var origPeStream = new MemoryStream(module.OriginalImageBytes);
                     using var origPeReader = new PEReader(origPeStream);
-                    var resourceDir = origPeReader.PEHeaders.PEHeader?.ResourceTableDirectory;
+                    var headers = origPeReader.PEHeaders;
+                    var resourceDir = headers.PEHeader?.ResourceTableDirectory;
                     if (resourceDir.HasValue && resourceDir.Value.Size > 0 && resourceDir.Value.RelativeVirtualAddress != 0)
                     {
-                        var sectionData = origPeReader.GetSectionData(resourceDir.Value.RelativeVirtualAddress);
-                        var resourceBytes = sectionData.GetReader(0, resourceDir.Value.Size).ReadBytes(resourceDir.Value.Size);
-                        nativeResources = new RawWin32ResourceSectionBuilder(resourceBytes);
+                        // The absolute RVAs stored in each resource leaf IMAGE_RESOURCE_DATA_ENTRY
+                        // are relative to the original section base, so capture that base before
+                        // the section is relocated. Guessing it from the section bytes is unreliable
+                        // because the directory entries, data entries and data blobs are laid out
+                        // differently by different toolchains (link.exe/cvtres vs Mono/Xamarin).
+                        int originalSectionRva = ResolveSectionRva(headers, resourceDir.Value.RelativeVirtualAddress);
+                        if (originalSectionRva != 0)
+                        {
+                            var sectionData = origPeReader.GetSectionData(resourceDir.Value.RelativeVirtualAddress);
+                            var resourceBytes = sectionData.GetReader(0, resourceDir.Value.Size).ReadBytes(resourceDir.Value.Size);
+                            nativeResources = new RawWin32ResourceSectionBuilder(resourceBytes, originalSectionRva);
+                        }
                     }
                 }
                 catch
@@ -2581,6 +2591,25 @@ namespace LeXtudio.Metadata.Mutable
 
             return true;
         }
+
+        /// <summary>
+        /// Returns the virtual address (section base) of the PE section that contains
+        /// <paramref name="rva"/>, or 0 when no section matches.
+        /// </summary>
+        internal static int ResolveSectionRva(PEHeaders headers, int rva)
+        {
+            if (headers == null)
+                return 0;
+
+            foreach (var section in headers.SectionHeaders)
+            {
+                int size = Math.Max(section.VirtualSize, section.SizeOfRawData);
+                if (rva >= section.VirtualAddress && rva < section.VirtualAddress + size)
+                    return section.VirtualAddress;
+            }
+
+            return 0;
+        }
     }
 
     /// <summary>
@@ -2590,10 +2619,12 @@ namespace LeXtudio.Metadata.Mutable
     internal sealed class RawWin32ResourceSectionBuilder : ResourceSectionBuilder
     {
         private readonly byte[] _originalSectionBytes;
+        private readonly int _originalSectionRva;
 
-        public RawWin32ResourceSectionBuilder(byte[] originalSectionBytes)
+        public RawWin32ResourceSectionBuilder(byte[] originalSectionBytes, int originalSectionRva)
         {
             _originalSectionBytes = originalSectionBytes ?? throw new ArgumentNullException(nameof(originalSectionBytes));
+            _originalSectionRva = originalSectionRva;
         }
 
         protected override void Serialize(BlobBuilder builder, SectionLocation location)
@@ -2603,21 +2634,17 @@ namespace LeXtudio.Metadata.Mutable
             // we must patch every leaf OffsetToData field so it points to the correct new RVA.
             //
             // Directory entries that point to sub-directories use offsets relative to the start of
-            // the resource section (bit 31 set), so those do NOT need patching.
+            // the resource directory (bit 31 set), so those do NOT need patching.
             //
-            // We don't know the original section RVA here, so we read the raw bytes, walk the
-            // resource directory tree to find all leaf IMAGE_RESOURCE_DATA_ENTRY records, and
-            // patch their OffsetToData fields by computing:
-            //   newRVA = oldRVA - originalSectionRva + location.RelativeVirtualAddress
-            //
-            // We compute originalSectionRva from the first leaf entry: its OffsetToData must
-            // lie within the section, so (OffsetToData - offset_within_section) gives us the
-            // original base. We find the data offset by following the directory tree.
+            // Because the whole section is relocated by a constant delta
+            // (newSectionRva - originalSectionRva), every absolute RVA stored inside the
+            // section simply shifts by that delta — regardless of how the toolchain that
+            // produced the section interleaved directory entries, data entries and data blobs.
 
             var bytes = (byte[])_originalSectionBytes.Clone();
             try
             {
-                PatchResourceDataEntries(bytes, location.RelativeVirtualAddress);
+                PatchResourceDataEntries(bytes, _originalSectionRva, location.RelativeVirtualAddress);
             }
             catch
             {
@@ -2629,105 +2656,36 @@ namespace LeXtudio.Metadata.Mutable
             builder.WriteBytes(bytes);
         }
 
-        private static void PatchResourceDataEntries(byte[] bytes, int newSectionRva)
+        /// <summary>
+        /// Rewrites every leaf <c>IMAGE_RESOURCE_DATA_ENTRY.OffsetToData</c> (an absolute RVA)
+        /// by adding the section relocation delta.
+        /// </summary>
+        /// <param name="bytes">Raw <c>.rsrc</c> section bytes (root resource directory at offset 0).</param>
+        /// <param name="originalSectionRva">Virtual address of the original <c>.rsrc</c> section.</param>
+        /// <param name="newSectionRva">Virtual address of the relocated <c>.rsrc</c> section.</param>
+        internal static void PatchResourceDataEntries(byte[] bytes, int originalSectionRva, int newSectionRva)
         {
-            if (bytes.Length < 16)
-                return;
-
-            // First pass: collect all leaf IMAGE_RESOURCE_DATA_ENTRY offsets and one
-            // representative (offset_of_entry, data_offset_within_section) pair to
-            // compute the original section RVA.
-            var leafOffsets = new List<int>();
-            CollectLeafOffsets(bytes, 0, leafOffsets, depth: 0);
-
-            if (leafOffsets.Count == 0)
-                return;
-
-            // Each IMAGE_RESOURCE_DATA_ENTRY is 16 bytes:
-            //   DWORD OffsetToData   (absolute RVA)
-            //   DWORD Size
-            //   DWORD CodePage
-            //   DWORD Reserved
-            //
-            // We determine originalSectionRva from the first leaf by computing
-            // how far into the section the data actually lives.
-            // data_within_section = OffsetToData - originalSectionRva  =>
-            // We must infer originalSectionRva. We can't do so without additional context,
-            // so instead we just relocate all OffsetToData values by the delta
-            // (newSectionRva - originalSectionRva), where we compute originalSectionRva
-            // from the first valid leaf.
-
-            int firstLeafOffset = leafOffsets[0];
-            if (firstLeafOffset + 16 > bytes.Length)
-                return;
-
-            int firstOffsetToData = BitConverter.ToInt32(bytes, firstLeafOffset);
-            // The data pointed to by OffsetToData is at some position within the section.
-            // We know: firstOffsetToData = originalSectionRva + data_within_section_offset
-            // We cannot recover data_within_section_offset without knowing originalSectionRva.
-            //
-            // However, the IMAGE_RESOURCE_DATA_ENTRY Size field tells us how big the data is,
-            // and the directory entries before it tell us where in the section the data resides.
-            // A simpler heuristic: originalSectionRva ≈ firstOffsetToData - (some offset).
-            //
-            // In practice, resource data is placed after the directory tree, so for the first
-            // leaf the data almost always starts after all directory entries. We can bound it:
-            // originalSectionRva must satisfy:
-            //   0 <= firstOffsetToData - originalSectionRva < bytes.Length
-            //
-            // Without the original PE's section RVA we approximate by scanning for the
-            // smallest OffsetToData across all leaves and using that to infer the base.
-
-            int minOffsetToData = int.MaxValue;
-            foreach (int off in leafOffsets)
-            {
-                if (off + 4 <= bytes.Length)
-                {
-                    int rva = BitConverter.ToInt32(bytes, off);
-                    if (rva > 0 && rva < minOffsetToData)
-                        minOffsetToData = rva;
-                }
-            }
-
-            if (minOffsetToData == int.MaxValue || minOffsetToData <= 0)
-                return;
-
-            // The minimum OffsetToData should map to somewhere inside the section bytes.
-            // We assume the minimum data starts at some offset >= directory entries size.
-            // Find the corresponding within-section offset by searching for a region that
-            // looks like it could be the resource data. As a safe lower bound, use 0.
-            //
-            // A reliable approach: the within-section offset of the minimum data must be
-            // minOffsetToData - originalSectionRva = some value in [0, bytes.Length).
-            // We pick originalSectionRva = minOffsetToData - withinSectionOffset where
-            // withinSectionOffset is determined by finding it in the directory.
-            //
-            // Simpler: walk leaves in parallel with the directory to find the withinSectionOffset.
-            // For now, use the approach: find the within-section data offset for the leaf with
-            // the smallest OffsetToData by re-walking the tree and tracking data offsets.
-
-            int withinSectionOffset = FindFirstDataWithinSectionOffset(bytes, leafOffsets);
-            if (withinSectionOffset < 0)
-                return;
-
-            int originalSectionRva = minOffsetToData - withinSectionOffset;
-            if (originalSectionRva <= 0)
+            if (bytes == null || bytes.Length < 16 || originalSectionRva <= 0)
                 return;
 
             int delta = newSectionRva - originalSectionRva;
             if (delta == 0)
-            {
                 return;
-            }
 
-            // Patch all leaf OffsetToData values.
+            // Collect every leaf IMAGE_RESOURCE_DATA_ENTRY offset (offsets are relative to the
+            // start of the resource directory) and shift the absolute RVA stored in each.
+            var leafOffsets = new List<int>();
+            CollectLeafOffsets(bytes, 0, leafOffsets, depth: 0);
+
             foreach (int off in leafOffsets)
             {
-                if (off + 4 > bytes.Length)
+                if (off < 0 || off + 4 > bytes.Length)
                     continue;
+
                 int oldRva = BitConverter.ToInt32(bytes, off);
                 if (oldRva <= 0)
                     continue;
+
                 int newRva = oldRva + delta;
                 bytes[off] = (byte)newRva;
                 bytes[off + 1] = (byte)(newRva >> 8);
@@ -2769,103 +2727,6 @@ namespace LeXtudio.Metadata.Mutable
                     leafOffsets.Add((int)offsetToDataOrDir);
                 }
             }
-        }
-
-        private static int FindFirstDataWithinSectionOffset(byte[] bytes, List<int> leafOffsets)
-        {
-            // leafOffsets are within-section offsets of IMAGE_RESOURCE_DATA_ENTRY structs.
-            // The first DWORD of each entry is OffsetToData (absolute RVA).
-            // We want the within-section data offset for the leaf that has the minimum OffsetToData.
-            // Unfortunately we don't directly store where the actual data lives within the section
-            // via the directory traversal above — leafOffsets are offsets to the DATA_ENTRY structs,
-            // not to the data itself.
-            //
-            // The data for a leaf is NOT at leafOffset itself; it's somewhere else in the section.
-            // We need to compute: withinSectionDataOffset = leafOffsetToData (absolute RVA) - sectionBase.
-            //
-            // We can instead use a different approach: the data must live within the section bytes,
-            // so the within-section offset of the data for a leaf with OffsetToData=R is R - sectionBase.
-            // We need sectionBase to compute this — which is circular.
-            //
-            // Instead, note that the directory entries themselves reside at known offsets from
-            // the start of the section (that's what we traversed). The IMAGE_RESOURCE_DATA_ENTRY
-            // is at a within-section offset stored in the directory entry. Those offsets are in
-            // the 0x80000000 bit-cleared OffsetToDataOrDirectory field for leaf entries.
-            // So leafOffsets[] already contains the within-section offsets of the DATA_ENTRY structs.
-            //
-            // And the DATA_ENTRY's OffsetToData field is an absolute RVA, not a within-section offset.
-            // The actual data blob is at: within_section = DATA_ENTRY.OffsetToData - sectionRva.
-            //
-            // To recover sectionRva from known facts:
-            //   sectionRva = DATA_ENTRY.OffsetToData - within_section_of_data_blob
-            //
-            // We don't know within_section_of_data_blob directly. BUT we know that data blobs
-            // are typically placed after all directory and data-entry structures, and we can scan
-            // the DATA_ENTRY sizes to find a consistent placement.
-            //
-            // Simplest reliable approach: the DATA_ENTRY at leafOffsets[i] gives us Size and
-            // OffsetToData. We know the data is inside the section, so:
-            //   0 <= OffsetToData - sectionRva < bytes.Length
-            //   0 <= OffsetToData - sectionRva + Size <= bytes.Length
-            //
-            // We can binary-search for sectionRva by trying to find a value that satisfies
-            // all leaves, but this is complex.
-            //
-            // PRACTICAL SIMPLIFICATION: For resource sections, the directory tree entries
-            // (IMAGE_RESOURCE_DIRECTORY + entries) always come before the data. The data
-            // is placed contiguously after. The first within-section data offset is thus
-            // approximately the size of all directory structures. We compute this via
-            // the minimum OffsetToData matching a within-section alignment.
-            //
-            // We rely on: minOffsetToData - sectionRva ≡ within_section_min_data_offset
-            // and within_section_min_data_offset >= some_directory_size.
-            //
-            // The cleanest method without original section RVA: trust that within-section
-            // data offsets referenced from leaf entries actually align to 4-byte boundaries
-            // and fall within [0, bytes.Length). We pick the offset that makes
-            // (minRva - candidateSectionRva) ∈ [0, bytes.Length).
-            //
-            // We iterate over leaf DATA_ENTRY offsets and use the leaf's OffsetToData
-            // together with the SIZE to find which leaf's data we can verify as valid bytes.
-            //
-            // For now: use the minimum within-section DATA_ENTRY offset (from leafOffsets)
-            // as a proxy, and assume the actual data follows the DATA_ENTRY table.
-            // Return the minimum leafOffset as an approximate lower bound.
-
-            if (leafOffsets.Count == 0)
-                return -1;
-
-            int minLeafOffset = int.MaxValue;
-            int minLeafRva = int.MaxValue;
-
-            foreach (int off in leafOffsets)
-            {
-                if (off + 4 <= bytes.Length)
-                {
-                    int rva = BitConverter.ToInt32(bytes, off);
-                    if (rva > 0 && rva < minLeafRva)
-                    {
-                        minLeafRva = rva;
-                        minLeafOffset = off;
-                    }
-                }
-            }
-
-            if (minLeafOffset == int.MaxValue)
-                return -1;
-
-            // The minimum leaf DATA_ENTRY offset within the section is minLeafOffset.
-            // Data blobs are placed after data entries; the minimum data blob offset is
-            // at least after all leaf DATA_ENTRY structs (each 16 bytes).
-            // We compute the minimum expected data offset as just past the DATA_ENTRY structs.
-            // This is a heuristic but works for standard compiler-generated resource sections.
-            int minDataEntryEnd = leafOffsets.Max() + 16;
-
-            // Align up to 4 bytes
-            if (minDataEntryEnd % 4 != 0)
-                minDataEntryEnd += 4 - (minDataEntryEnd % 4);
-
-            return minDataEntryEnd < bytes.Length ? minDataEntryEnd : 0;
         }
     }
 }
