@@ -1361,4 +1361,106 @@ public class MutableAssemblyWriterRoundTripTests
         typeBuilder.CreateType();
         asmBuilder.Save(outputPath);
     }
+
+    /// <summary>
+    /// Regression test: adding synthesized top-level types (MetadataToken == 0), as
+    /// string hiding does, must not cause nested types to be emitted before their
+    /// declaring types. If that happens the NestedClass row is missing and the
+    /// runtime rejects the type with "format is invalid".
+    /// </summary>
+    [Fact]
+    public void Write_ManyTypesPlusSynthesizedTypes_PreservesNestedTypeRelationship()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "wxsg_nested_order_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var asmPath = Path.Combine(tempDir, "NestedOrdering.dll");
+        var rewrittenPath = Path.Combine(tempDir, "NestedOrdering_rw.dll");
+
+        try
+        {
+            EmitNestedOrderingAssembly(asmPath, topLevelCount: 32);
+
+            var reader = new MutableAssemblyReader();
+            var assembly = reader.Read(asmPath, new MutableReaderParameters { ReadMethodBodies = true });
+
+            // Simulate the helper types produced by string hiding. These have
+            // MetadataToken == 0, which used to make the type ordering comparator
+            // inconsistent and reorder nested types ahead of their declaring types.
+            var guid = Guid.NewGuid().ToString().ToUpperInvariant();
+            var objectType = assembly.MainModule.TypeSystem.Object;
+            var layoutType = new MutableTypeDefinition("1{" + guid + "}", "2",
+                TypeAttributes.ExplicitLayout | TypeAttributes.Sealed | TypeAttributes.NotPublic, objectType);
+            layoutType.IsValueType = true;
+            var helperType = new MutableTypeDefinition("<PrivateImplementationDetails>{" + guid + "}", guid,
+                TypeAttributes.BeforeFieldInit | TypeAttributes.AutoClass | TypeAttributes.AnsiClass, objectType);
+            assembly.MainModule.Types.Add(layoutType);
+            assembly.MainModule.Types.Add(helperType);
+
+            assembly.MainModule.FileName = rewrittenPath;
+            new MutableAssemblyWriter(assembly).Write(rewrittenPath);
+
+            using (var stream = File.OpenRead(rewrittenPath))
+            using (var pe = new PEReader(stream))
+            {
+                var metadata = pe.GetMetadataReader();
+                var nestedNames = metadata.TypeDefinitions
+                    .Select(metadata.GetTypeDefinition)
+                    .Where(t => !t.GetDeclaringType().IsNil)
+                    .Select(t => metadata.GetString(t.Name))
+                    .ToList();
+
+                Assert.Contains("Nested", nestedNames);
+                Assert.Contains("NestedGen", nestedNames);
+            }
+
+            var ctx = new AssemblyLoadContext("NestedOrdering_" + Guid.NewGuid(), isCollectible: true);
+            Assembly loaded;
+            try
+            {
+                loaded = ctx.LoadFromAssemblyPath(rewrittenPath);
+            }
+            catch (Exception ex)
+            {
+                ctx.Unload();
+                Assert.Fail($"Failed to load round-tripped assembly: {ex}");
+                return;
+            }
+
+            var loadException = Record.Exception(() => loaded.GetTypes());
+            ctx.Unload();
+
+            Assert.Null(loadException);
+        }
+        finally
+        {
+            try { Directory.Delete(tempDir, recursive: true); } catch { }
+        }
+    }
+
+    private static void EmitNestedOrderingAssembly(string outputPath, int topLevelCount)
+    {
+        var asmName = new AssemblyName("NestedOrdering");
+        var asmBuilder = new PersistedAssemblyBuilder(asmName, typeof(object).Assembly);
+        var modBuilder = asmBuilder.DefineDynamicModule("NestedOrdering");
+
+        for (int i = 0; i < topLevelCount; i++)
+        {
+            var typeBuilder = modBuilder.DefineType(
+                $"RoundTripTest.T{i:D2}",
+                TypeAttributes.Public | TypeAttributes.Class);
+
+            if (i == 0)
+            {
+                typeBuilder.DefineNestedType("Nested", TypeAttributes.NestedPrivate | TypeAttributes.Class).CreateType();
+
+                var nestedGeneric = typeBuilder.DefineNestedType("NestedGen", TypeAttributes.NestedPrivate | TypeAttributes.Class);
+                nestedGeneric.DefineGenericParameters("T");
+                nestedGeneric.CreateType();
+            }
+
+            typeBuilder.CreateType();
+        }
+
+        asmBuilder.Save(outputPath);
+    }
 }

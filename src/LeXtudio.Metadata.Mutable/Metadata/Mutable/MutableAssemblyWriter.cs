@@ -211,13 +211,39 @@ namespace LeXtudio.Metadata.Mutable
         private void WriteTypeDefinitionsFirstPass()
         {
             var module = _assembly.MainModule;
-            
+
             // Preserve original TypeDef row order when available so MethodDef/FieldDef
             // handles remain stable across a read/write round trip.
             _orderedTypes.Clear();
             CollectTypes(module.Types, _orderedTypes);
+
+            // Types synthesized during obfuscation (for example the helper types
+            // produced by string hiding) have MetadataToken == 0. For those,
+            // CompareTypeDefinitionOrder falls back to a namespace/name comparison,
+            // which makes the ordering inconsistent (not a total order) and can move a
+            // nested type ahead of its declaring type. CreateTypeDefinition() then
+            // cannot attach the nested type and writes it as a top-level type, which
+            // produces invalid metadata ("Could not load type ... format is invalid").
+            //
+            // Assign synthesized types stable tokens that sort after all original
+            // types so the comparator stays consistent and the original ordering
+            // (which already places declaring types before their nested types) is kept.
+            var maxToken = 0;
+            foreach (var type in _orderedTypes)
+            {
+                if (type.MetadataToken > maxToken)
+                    maxToken = type.MetadataToken;
+            }
+
+            var syntheticToken = maxToken + 1;
+            foreach (var type in _orderedTypes)
+            {
+                if (type.MetadataToken == 0)
+                    type.MetadataToken = syntheticToken++;
+            }
+
             _orderedTypes.Sort(CompareTypeDefinitionOrder);
-            
+
             var fieldIndex = 1;
             var methodIndex = 1;
             foreach (var type in _orderedTypes)
