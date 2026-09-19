@@ -1,12 +1,12 @@
+using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
 using System.Reflection.PortableExecutable;
-using Microsoft.Extensions.Logging;
 
 namespace LeXtudio.Metadata.Mutable
 {
@@ -2465,13 +2465,25 @@ namespace LeXtudio.Metadata.Mutable
                     {
                         using var origPeStream = new MemoryStream(module.OriginalImageBytes);
                         using var origPeReader = new PEReader(origPeStream);
-                        var resourceDir = origPeReader.PEHeaders.PEHeader?.ResourceTableDirectory;
+
+						var headers = origPeReader.PEHeaders;
+						var resourceDir = headers.PEHeader?.ResourceTableDirectory;
                         if (resourceDir.HasValue && resourceDir.Value.Size > 0 && resourceDir.Value.RelativeVirtualAddress != 0)
                         {
-                            var sectionData = origPeReader.GetSectionData(resourceDir.Value.RelativeVirtualAddress);
-                            var resourceBytes = sectionData.GetReader(0, resourceDir.Value.Size).ReadBytes(resourceDir.Value.Size);
-                            nativeResources = new RawWin32ResourceSectionBuilder(resourceBytes);
-                        }
+							// The absolute RVAs stored in each resource leaf IMAGE_RESOURCE_DATA_ENTRY
+							// are relative to the original section base, so capture that base before
+							// the section is relocated. Guessing it from the section bytes is unreliable
+							// because the directory entries, data entries and data blobs are laid out
+							// differently by different toolchains (link.exe/cvtres vs Mono/Xamarin).
+							int originalSectionRva = ResolveSectionRva(headers, resourceDir.Value.RelativeVirtualAddress);
+							if (originalSectionRva != 0)
+							{
+								var sectionData = origPeReader.GetSectionData(resourceDir.Value.RelativeVirtualAddress);
+								var resourceBytes = sectionData.GetReader(0, resourceDir.Value.Size).ReadBytes(resourceDir.Value.Size);
+								nativeResources = new RawWin32ResourceSectionBuilder(resourceBytes, originalSectionRva);
+							}
+
+						}
                     }
                     catch
                     {
